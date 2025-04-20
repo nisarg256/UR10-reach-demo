@@ -3,17 +3,21 @@ import mujoco
 from scipy.optimize import minimize
 
 class ReachabilityAnalyzer:
-    def __init__(self, model_path, flat_prefix="flat_", perp_prefix="perp_"):
+    def __init__(self, model_path, config=None, flat_prefix="flat_", perp_prefix="perp_"):
         """
         Initialize the reachability analyzer for UR10e robots.
         
         Args:
             model_path: Path to the MuJoCo XML model file
+            config: Configuration dictionary
             flat_prefix: Prefix for the flat-mounted robot's joint names
             perp_prefix: Prefix for the perpendicularly-mounted robot's joint names
         """
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
+        
+        # Store the configuration
+        self.config = config or {}
         
         # Store the prefixes for the two robot configurations
         self.flat_prefix = flat_prefix
@@ -27,13 +31,19 @@ class ReachabilityAnalyzer:
         self.flat_tool_tip_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "flat_tool_tip")
         self.perp_tool_tip_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "perp_tool_tip")
         
-        # Wall position (from the XML, the wall is at x=1.2)
-        self.wall_x = 1.2
+        # Wall position (from config or default)
+        self.wall_x = self.config.get('wall', {}).get('x_position', 1.2)
         
         # Set initial configurations to help IK solver
         # A more appropriate starting configuration for flat robot
         self.flat_initial_config = np.array([0.0, -1.0, 1.5, -0.5, 1.57, 0.0])
         self.perp_initial_config = np.array([0.0, -1.57, 1.57, 0.0, 0.0, 0.0])
+        
+        # Get perpendicularity threshold from config
+        self.perp_angle_threshold = self.config.get('robot', {}).get('perp_angle_threshold', 0.35)
+        
+        # Get IK tolerance from config
+        self.ik_tolerance = self.config.get('robot', {}).get('ik_tolerance', 0.05)
         
     def _get_joint_ids(self, prefix):
         """Get joint IDs for a robot configuration."""
@@ -89,7 +99,7 @@ class ReachabilityAnalyzer:
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0))
         
         # Return True if the angle is close to 0 (perpendicular to wall)
-        return angle < 0.35  # About 20 degrees
+        return angle < self.perp_angle_threshold
     
     def _ik_objective(self, q, joint_ids, tool_tip_id, target_pos, robot_type):
         """Objective function for inverse kinematics."""
@@ -111,7 +121,7 @@ class ReachabilityAnalyzer:
         
         return pos_error + perp_penalty + wall_penalty
     
-    def is_point_reachable(self, point, robot_type="flat", max_attempts=15):  # Increased attempts
+    def is_point_reachable(self, point, robot_type="flat", max_attempts=None):
         """
         Check if a point is reachable by a robot while maintaining perpendicularity to the wall.
         
@@ -123,6 +133,10 @@ class ReachabilityAnalyzer:
         Returns:
             (bool, np.array): Tuple of (is_reachable, joint_angles)
         """
+        # Get max attempts from config or use default
+        if max_attempts is None:
+            max_attempts = self.config.get('robot', {}).get('max_ik_attempts', 15)
+            
         if robot_type == "flat":
             joint_ids = self.flat_joint_ids
             tool_tip_id = self.flat_tool_tip_id
@@ -168,11 +182,11 @@ class ReachabilityAnalyzer:
                 best_result = result
                 
                 # If we found a good solution, stop early
-                if best_error < 0.05:  # Good solution threshold
+                if best_error < self.ik_tolerance:  # Good solution threshold from config
                     break
         
-        # Check if the best solution is good enough
-        is_reachable = best_error < 0.15
+        # Check if the best solution is good enough - use 3x tolerance for acceptance
+        is_reachable = best_error < (3 * self.ik_tolerance)
         
         if is_reachable:
             # Set the joints to the solution and check if it's actually perpendicular
@@ -180,7 +194,7 @@ class ReachabilityAnalyzer:
             pos = self._get_tool_tip_position(tool_tip_id)
             
             # Double check that the tool is at the wall and perpendicular to it
-            at_wall = abs(pos[0] - self.wall_x) < 0.05
+            at_wall = abs(pos[0] - self.wall_x) < self.ik_tolerance
             perpendicular = self._check_perpendicularity(tool_tip_id)
             
             is_reachable = at_wall and perpendicular
@@ -193,18 +207,26 @@ class ReachabilityAnalyzer:
         
         return is_reachable, best_result.x if is_reachable else None
     
-    def analyze_wall_reachability(self, y_range=(-0.8, 0.8), z_range=(0.5, 2.0), resolution=0.1):
+    def analyze_wall_reachability(self, y_range=None, z_range=None, resolution=None):
         """
         Analyze the reachability of points on the wall for both robot configurations.
         
         Args:
-            y_range: (min_y, max_y) range to check (default: adjusted to more likely reachable area)
-            z_range: (min_z, max_z) range to check (default: adjusted to more likely reachable area)
-            resolution: Distance between points to check
+            y_range: (min_y, max_y) range to check (default: from config)
+            z_range: (min_z, max_z) range to check (default: from config)
+            resolution: Distance between points to check (default: from config)
             
         Returns:
             (flat_reachable, perp_reachable): Two 2D arrays of boolean values indicating reachability
         """
+        # Get analysis parameters from config if not provided
+        if y_range is None:
+            y_range = self.config.get('workspace', {}).get('y_range', (-0.8, 0.8))
+        if z_range is None:
+            z_range = self.config.get('workspace', {}).get('z_range', (0.5, 2.0))
+        if resolution is None:
+            resolution = self.config.get('workspace', {}).get('resolution', 0.1)
+        
         # Create grid of points to check
         y_points = np.arange(y_range[0], y_range[1] + resolution, resolution)
         z_points = np.arange(z_range[0], z_range[1] + resolution, resolution)

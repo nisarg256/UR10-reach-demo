@@ -11,6 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
+from src.config.config_loader import load_config
 from src.reachability.workspace_analysis import ReachabilityAnalyzer
 from src.visualization.render import visualize_reachability
 
@@ -18,23 +19,33 @@ def main():
     print("UR10e Reachability Analysis for Drywall Finishing")
     print("="*50)
     
+    # Load configuration
+    config = load_config()
+    
     # Path to the MuJoCo model
     model_path = os.path.join(project_root, "models", "reach_comparison.xml")
     
     # Create the reachability analyzer
-    analyzer = ReachabilityAnalyzer(model_path)
+    analyzer = ReachabilityAnalyzer(model_path, config=config)
     
     # Parameters for the reachability analysis
-    y_range = (-0.8, 0.8)  # Y-range to check (meters)
-    z_range = (0.5, 2.0)   # Z-range to check (meters)
-    resolution = 0.1       # Grid resolution (meters)
+    y_range = config.get('workspace', {}).get('y_range', (-0.8, 0.8))
+    z_range = config.get('workspace', {}).get('z_range', (0.5, 2.0))
+    resolution = config.get('workspace', {}).get('resolution', 0.1)
     
     print(f"Analyzing reachability in the following workspace:")
     print(f"  Wall X position: {analyzer.wall_x} m")
     print(f"  Y range: {y_range} m")
     print(f"  Z range: {z_range} m")
     print(f"  Resolution: {resolution} m")
-    print(f"This will check {int((y_range[1]-y_range[0])/resolution+1)*int((z_range[1]-z_range[0])/resolution+1)} points.")
+    
+    # Calculate total points 
+    grid_y_points = int((y_range[1]-y_range[0])/resolution+1)
+    grid_z_points = int((z_range[1]-z_range[0])/resolution+1)
+    total_points = grid_y_points * grid_z_points
+    
+    print(f"This will check {total_points} points.")
+    print(f"Estimated analysis time: {total_points * 0.02:.1f} seconds")
     
     # Ask for confirmation
     input("Press Enter to start the analysis (this may take several minutes)...")
@@ -67,16 +78,23 @@ def main():
     print(f"Perpendicular robot can reach {perp_count} points ({perp_count / total_points * 100:.1f}% of workspace)")
     print(f"Both robots can reach {both_count} points ({both_count / total_points * 100:.1f}% of workspace)")
     
-    # Save the results
+    # Save the results and configuration used
+    save_data = {
+        'reachability_data': reachability_data,
+        'config': config,
+        'analysis_time': elapsed_time,
+        'timestamp': time.time()
+    }
+    
     save_path = os.path.join(project_root, "reachability_data.pkl")
     with open(save_path, 'wb') as f:
-        pickle.dump(reachability_data, f)
+        pickle.dump(save_data, f)
     
     print(f"Reachability data saved to {save_path}")
     
     # Visualize the results
     print("Visualizing reachability map...")
-    title = "UR10e Wall Reachability Analysis"
+    title = f"UR10e Wall Reachability Analysis (Resolution: {resolution}m)"
     visualize_reachability(reachability_data, title=title)
     
     print("Analysis complete.")

@@ -1,0 +1,29 @@
+# UR10e Reach Analysis Configuration
+
+# Wall position
+wall:
+  x_position: 1.2  # meters
+
+# Workspace analysis parameters
+workspace:
+  # Analysis boundary (in meters)
+  y_range: [-1.0, 1.0]    # Expanded horizontal range
+  z_range: [0.2, 2.2]     # Expanded vertical range
+  resolution: 0.05        # Finer grid resolution for analysis
+  
+# Trajectory parameters
+trajectory:
+  num_passes: 15          # Number of horizontal passes in S-pattern
+  point_spacing: 0.02     # Spacing between trajectory points (meters)
+  
+# Robot parameters
+robot:
+  # IK parameters
+  max_ik_attempts: 15
+  ik_tolerance: 0.05
+  # Perpendicularity constraint
+  perp_angle_threshold: 0.15  # radians (about 8.6 degrees) - stricter perpendicularity
+  
+# Visualization parameters
+visualization:
+  trajectory_speed: 0.05   # Seconds between trajectory points 
