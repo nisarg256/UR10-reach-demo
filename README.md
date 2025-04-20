@@ -11,7 +11,7 @@ The analysis focuses on drywall finishing applications, where the robot must mai
 - **Python 3.6+**
 - **MuJoCo 2.3.2**: The main physics engine used for simulation
 - **NumPy**: For numerical operations
-- **SciPy**: For optimization (inverse kinematics)
+- **SciPy**: For optimization (inverse kinematics) and interpolation (CubicSpline)
 - **Matplotlib**: For visualization of reachability maps
 - **GLFW**: For rendering the MuJoCo simulation
 - **PyYAML**: For configuration file handling
@@ -20,7 +20,7 @@ The analysis focuses on drywall finishing applications, where the robot must mai
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/UR10-reach-demo.git
+   git clone https://github.com/nisarg256/UR10-reach-demo.git
    cd UR10-reach-demo
    ```
 
@@ -48,7 +48,8 @@ UR10-reach-demo/
 │   │   └── workspace_analysis.py  # Core IK solver and workspace analysis
 │   ├── trajectory/             # Trajectory generation
 │   │   ├── __init__.py
-│   │   └── s_pattern.py        # S-pattern trajectory generator
+│   │   ├── s_pattern.py        # S-pattern trajectory generator
+│   │   └── motion_planning.py  # Smooth trajectory planning and time parameterization
 │   └── visualization/          # Visualization utilities
 │       ├── __init__.py
 │       └── render.py           # MuJoCo renderer and plotting functions
@@ -62,7 +63,7 @@ UR10-reach-demo/
 
 ## Configuration System
 
-The project now uses a YAML-based configuration system (`config/simulation_params.yaml`) that centralizes all parameters:
+The project uses a YAML-based configuration system (`config/simulation_params.yaml`) that centralizes all parameters:
 
 ```yaml
 # Example configuration parameters
@@ -76,6 +77,12 @@ workspace:
 
 robot:
   perp_angle_threshold: 0.15  # radians (about 8.6 degrees)
+
+motion_planning:
+  spline_density: 4          # Points per waypoint (density of trajectory)
+  velocity_limit: 2.5        # Maximum joint velocity (rad/s)
+  acceleration_limit: 5.0    # Maximum joint acceleration (rad/s²)
+  check_collisions: false    # Whether to check for collisions during motion planning
 ```
 
 This allows easy adjustment of analysis parameters without modifying code.
@@ -114,6 +121,24 @@ The `generate_s_pattern` function generates S-shaped trajectories through the re
 - Uses interpolation between grid points for smoother trajectories
 - Point spacing is configurable for varying density of path points
 
+### Motion Planning (`src/trajectory/motion_planning.py`)
+
+The motion planning module provides smooth trajectory generation:
+
+- **Cubic Spline Interpolation**: Creates smooth transitions between waypoints
+  - Generates splines for each joint's motion
+  - Interpolates positions on the wall smoothly
+
+- **Time Parameterization**: Ensures motion respects velocity and acceleration limits
+  - Calculates appropriate timing between waypoints
+  - Smooths time intervals to prevent jerky motion
+  - Enforces maximum velocity and acceleration constraints
+
+- **RRT Motion Planning** (optional): Can plan collision-free paths when enabled
+  - Rapidly-exploring Random Tree algorithm for motion planning
+  - Handles complex joint space navigation
+  - Currently disabled by default for faster computation
+
 ### Visualization (`src/visualization/render.py`)
 
 Contains two main components:
@@ -141,12 +166,13 @@ Example usage:
 This script:
 1. Loads configuration and previously calculated reachability data
 2. Generates smooth S-pattern trajectories through the reachable workspace
-3. Creates a MuJoCo visualization window
-4. Allows the user to select which robot to demonstrate:
+3. Applies motion planning to create smooth trajectories with proper timing
+4. Creates a MuJoCo visualization window
+5. Allows the user to select which robot to demonstrate:
    - Flat mounted robot
    - Perpendicular mounted robot
    - Both robots simultaneously
-5. Shows the robot moving through its reachable workspace while maintaining tool perpendicularity
+6. Shows the robot moving through its reachable workspace while maintaining tool perpendicularity with smooth, natural motion
 
 Example usage:
 ```bash
@@ -171,6 +197,27 @@ The perpendicularity constraint can be adjusted through the `perp_angle_threshol
 - **More strict (0.15 radians ≈ 8.6°)**: Requires more precise perpendicularity, resulting in smaller but more accurate workspace
 
 This is critical for drywall finishing applications, as it ensures the tool is properly oriented against the wall.
+
+## Smooth Motion Implementation
+
+The project implements advanced motion planning techniques to ensure smooth robot movement:
+
+1. **Cubic Spline Interpolation**: Generates smooth joint trajectories between waypoints
+   - Creates natural, continuous motion that respects joint limits
+   - Provides C2 continuity (continuous position, velocity, and acceleration)
+
+2. **Time Parameterization**: Controls the timing of robot motion
+   - Slows down for sharp turns and complex movements
+   - Speeds up for simple, straight-line motions
+   - Prevents jerky motion by enforcing acceleration limits
+
+3. **Velocity and Acceleration Limiting**: Ensures robot motion respects physical constraints
+   - Configurable limits for maximum joint velocity and acceleration
+   - Automatically adjusts timings to stay within limits
+
+4. **Optional Collision Avoidance**: Can be enabled for environments with obstacles
+   - Uses Rapidly-exploring Random Trees (RRT) algorithm
+   - Finds collision-free paths in joint space
 
 ## Results Interpretation
 
@@ -201,9 +248,10 @@ To adjust the analysis parameters:
    - Workspace boundaries and resolution
    - Perpendicularity threshold
    - Trajectory generation parameters
+   - Motion planning parameters (spline density, velocity/acceleration limits)
    - Visualization options
 2. Run `scripts/calculate_workspace.py` to re-analyze with new parameters
-3. Use `scripts/demonstrate_reach.py` or `scripts/visualize_results.py` to view results
+3. Use `scripts/demonstrate_reach.py` to view results with smooth motion
 
 ## Troubleshooting
 
@@ -213,9 +261,12 @@ To adjust the analysis parameters:
 2. **MuJoCo import errors**: Check that MuJoCo 2.3.2 is properly installed
 3. **PyYAML import errors**: Ensure PyYAML is installed with `pip install pyyaml`
 4. **Low reachability coverage**: Try adjusting the perpendicularity threshold in the configuration file
+5. **Slow trajectory generation**: Disable collision checking (`check_collisions: false`) for faster computation
+6. **Jerky robot motion**: Increase `spline_density` for smoother motion, or adjust velocity/acceleration limits
 
 ### Performance Tips:
 
 - Reduce the resolution for faster analysis (e.g., 0.2m instead of 0.05m)
 - Limit the Y and Z ranges to focus on areas of interest
-- For large workspaces, consider running the analysis in parallel (requires code modification)
+- Disable collision checking for faster trajectory generation
+- Reduce spline density for faster but less smooth motion

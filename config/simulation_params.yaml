@@ -26,4 +26,11 @@ robot:
   
 # Visualization parameters
 visualization:
-  trajectory_speed: 0.05   # Seconds between trajectory points 
+  trajectory_speed: 0.015  # Seconds between trajectory points (reduced for faster movement)
+
+# Motion planning parameters
+motion_planning:
+  spline_density: 4        # Points per waypoint (reduced for speed)
+  velocity_limit: 2.5      # Maximum joint velocity (rad/s) - increased for faster motion
+  acceleration_limit: 5.0  # Maximum joint acceleration (rad/s²) - increased for faster motion
+  check_collisions: false  # Disable collision checking for faster computation 
