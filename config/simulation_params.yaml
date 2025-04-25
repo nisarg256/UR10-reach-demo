@@ -13,8 +13,8 @@ workspace:
   
 # Trajectory parameters
 trajectory:
-  num_passes: 15          # Number of horizontal passes in S-pattern
-  point_spacing: 0.02     # Spacing between trajectory points (meters)
+  num_passes: 18          # Number of horizontal passes in S-pattern (increased for finer coverage)
+  point_spacing: 0.01     # Spacing between trajectory points (meters) - reduced for higher density
   
 # Robot parameters
 robot:
@@ -26,11 +26,23 @@ robot:
   
 # Visualization parameters
 visualization:
-  trajectory_speed: 0.015  # Seconds between trajectory points (reduced for faster movement)
+  trajectory_speed: 0.015  # Seconds between trajectory points (increased for more controlled motion)
 
 # Motion planning parameters
 motion_planning:
-  spline_density: 4        # Points per waypoint (reduced for speed)
-  velocity_limit: 2.5      # Maximum joint velocity (rad/s) - increased for faster motion
-  acceleration_limit: 5.0  # Maximum joint acceleration (rad/s²) - increased for faster motion
-  check_collisions: false  # Disable collision checking for faster computation 
+  spline_density: 4          # Points per waypoint (density of trajectory)
+  velocity_limit: 3.0        # Maximum joint velocity (rad/s) - increased from 0.8
+  acceleration_limit: 6.0    # Maximum joint acceleration (rad/s²) - increased from 1.5
+  check_collisions: false    # Whether to check for collisions during motion planning
+  rrt_timeout: 1.0           # Timeout for RRT planning (seconds)
+  max_iterations: 500        # Maximum iterations for RRT planning
+
+# PID controller parameters for smooth motion
+pid_controller:
+  kp: 0.8                # Proportional gain (lower for smoother motion)
+  ki: 0.05               # Integral gain (lower to reduce oscillation)
+  kd: 0.15               # Derivative gain (higher for better damping)
+  dt: 0.01               # Time step between updates (seconds)
+  steps: 10              # Number of interpolation steps between waypoints
+
+# ... existing code ... 

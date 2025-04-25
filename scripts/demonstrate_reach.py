@@ -15,6 +15,7 @@ from src.config.config_loader import load_config
 from src.trajectory.s_pattern import generate_s_pattern
 from src.visualization.render import MujocoRenderer
 from src.trajectory.motion_planning import create_smooth_trajectory
+from src.trajectory.pid_controller import PIDController
 
 def main():
     print("UR10e Reach Demonstration for Drywall Finishing")
@@ -126,6 +127,14 @@ def main():
     print(f"Generated {len(smooth_flat_trajectory)} points for smooth flat robot trajectory")
     print(f"Generated {len(smooth_perp_trajectory)} points for smooth perpendicular robot trajectory")
     
+    # Add information about the camera controls
+    print("\n== Interactive Camera Controls ==")
+    print("• Left mouse button + drag: Rotate camera")
+    print("• Right mouse button + drag: Pan camera")
+    print("• Mouse wheel: Zoom in/out")
+    print("• R key: Reset camera view")
+    print("===============================\n")
+
     # Ask user which robot to demonstrate
     while True:
         print("\nSelect a robot to demonstrate reachability:")
@@ -182,9 +191,25 @@ def demonstrate_robot_smooth(model, data, renderer, trajectory, joint_ids, marke
     # Get base speed from config
     base_speed = config.get('visualization', {}).get('trajectory_speed', 0.015)
     
+    # Initialize PID controller with parameters from config or defaults
+    pid_config = config.get('pid_controller', {})
+    kp = pid_config.get('kp', 1.0)
+    ki = pid_config.get('ki', 0.1)
+    kd = pid_config.get('kd', 0.05)
+    dt = pid_config.get('dt', 0.01)
+    steps = pid_config.get('steps', 5)
+    
+    pid = PIDController(kp=kp, ki=ki, kd=kd, dt=dt)
+    
+    # Get velocity limit from motion planning config
+    velocity_limit = config.get('motion_planning', {}).get('velocity_limit', 1.0)
+    
     # Visualize the trajectory
     print("Press Enter to start following the smooth S-pattern trajectory...")
     input()
+    
+    # Initialize current joint positions
+    current_joint_positions = np.zeros(len(joint_ids))
     
     try:
         for i, (point, joint_config, time_to_next) in enumerate(trajectory):
@@ -196,19 +221,38 @@ def demonstrate_robot_smooth(model, data, renderer, trajectory, joint_ids, marke
             wall_x = config.get('wall', {}).get('x_position', 1.2)
             data.site_xpos[marker_id] = [wall_x, point[0], point[1]]
             
-            # Set the joint positions
-            for j, position in enumerate(joint_config):
-                data.qpos[joint_ids[j]] = position
+            # Get target joint config as numpy array
+            target_joint_positions = np.array(joint_config)
             
-            # Forward kinematics
-            mujoco.mj_forward(model, data)
+            # Use PID controller to generate smooth transition to target
+            smooth_positions = pid.step_towards_target(
+                current_joint_positions, 
+                target_joint_positions,
+                velocity_limit,
+                steps=steps
+            )
             
-            # Render the scene
-            done = renderer.render()
-            if done:
-                break
+            # Set the current position to the last position in the smoothed trajectory
+            current_joint_positions = smooth_positions[-1].copy()
             
-            # Use a reasonable wait time (capped to avoid getting stuck and lower minimum)
+            # Execute the smoothed trajectory
+            for pos in smooth_positions:
+                # Set the joint positions
+                for j, position in enumerate(pos):
+                    data.qpos[joint_ids[j]] = position
+                
+                # Forward kinematics
+                mujoco.mj_forward(model, data)
+                
+                # Render the scene
+                done = renderer.render()
+                if done:
+                    break
+                
+                # Small sleep between steps for visual smoothness
+                time.sleep(dt)
+            
+            # Use a reasonable wait time between waypoints
             wait_time = min(time_to_next, 0.03) if time_to_next > 0.005 else base_speed
             time.sleep(wait_time)
         
@@ -249,65 +293,86 @@ def demonstrate_both_robots_smooth(model, data, renderer, flat_trajectory, perp_
     # Get base speed from config
     base_speed = config.get('visualization', {}).get('trajectory_speed', 0.015)
     
-    # Create interpolated trajectories with the same number of points
-    max_points = max(len(flat_trajectory), len(perp_trajectory))
-    flat_indices = np.linspace(0, len(flat_trajectory)-1, max_points, dtype=int)
-    perp_indices = np.linspace(0, len(perp_trajectory)-1, max_points, dtype=int)
+    # Initialize PID controllers
+    pid_config = config.get('pid_controller', {})
+    kp = pid_config.get('kp', 1.0)
+    ki = pid_config.get('ki', 0.1)
+    kd = pid_config.get('kd', 0.05)
+    dt = pid_config.get('dt', 0.01)
+    steps = pid_config.get('steps', 5)
     
-    # Calculate combined time intervals
-    time_intervals = []
-    for i in range(max_points):
-        flat_idx = flat_indices[i]
-        perp_idx = perp_indices[i]
-        
-        flat_time = flat_trajectory[flat_idx][2] if flat_idx < len(flat_trajectory) else 0.02
-        perp_time = perp_trajectory[perp_idx][2] if perp_idx < len(perp_trajectory) else 0.02
-        
-        # Use the maximum time interval to ensure both robots move smoothly
-        # Cap the time to prevent getting stuck (reduced maximum)
-        time_intervals.append(min(max(flat_time, perp_time), 0.03))
+    flat_pid = PIDController(kp=kp, ki=ki, kd=kd, dt=dt)
+    perp_pid = PIDController(kp=kp, ki=ki, kd=kd, dt=dt)
+    
+    # Get velocity limit from motion planning config
+    velocity_limit = config.get('motion_planning', {}).get('velocity_limit', 1.0)
     
     # Visualize the trajectory
-    print("Press Enter to start following both smooth trajectories...")
+    print("Press Enter to start following the smooth S-pattern trajectory...")
     input()
     
+    # Initialize current joint positions
+    flat_current_positions = np.zeros(len(flat_joint_ids))
+    perp_current_positions = np.zeros(len(perp_joint_ids))
+    
+    # Find the shorter trajectory to determine the number of steps
+    num_steps = min(len(flat_trajectory), len(perp_trajectory))
+    
     try:
-        for i in range(max_points):
+        for i in range(num_steps):
+            # Get waypoints from both trajectories
+            flat_point, flat_config, flat_time = flat_trajectory[i]
+            perp_point, perp_config, perp_time = perp_trajectory[i]
+            
             # Update the progress
-            if i % 50 == 0 or i == max_points - 1:  # Reduced frequency of progress updates
-                print(f"Point {i+1}/{max_points}")
+            if i % 50 == 0 or i == num_steps - 1:
+                print(f"Point {i+1}/{num_steps}")
             
-            # Get flat robot point and joint config
-            flat_idx = flat_indices[i]
-            if flat_idx < len(flat_trajectory):
-                flat_point, flat_config, _ = flat_trajectory[flat_idx]
-                # Set flat robot joint positions
-                for j, position in enumerate(flat_config):
-                    data.qpos[flat_joint_ids[j]] = position
-                    
-            # Get perp robot point and joint config
-            perp_idx = perp_indices[i]
-            if perp_idx < len(perp_trajectory):
-                perp_point, perp_config, _ = perp_trajectory[perp_idx]
-                # Set perp robot joint positions
-                for j, position in enumerate(perp_config):
-                    data.qpos[perp_joint_ids[j]] = position
-            
-            # Place the target marker at the flat point
+            # Place the target marker at the current point (using flat robot point)
             wall_x = config.get('wall', {}).get('x_position', 1.2)
-            if flat_idx < len(flat_trajectory):
-                data.site_xpos[marker_id] = [wall_x, flat_point[0], flat_point[1]]
+            data.site_xpos[marker_id] = [wall_x, flat_point[0], flat_point[1]]
             
-            # Forward kinematics
-            mujoco.mj_forward(model, data)
+            # Get target joint configs as numpy arrays
+            flat_target = np.array(flat_config)
+            perp_target = np.array(perp_config)
             
-            # Render the scene
-            done = renderer.render()
-            if done:
-                break
+            # Use PID controllers to generate smooth transitions to targets
+            flat_smooth_positions = flat_pid.step_towards_target(
+                flat_current_positions, flat_target, velocity_limit, steps=steps
+            )
             
-            # Use a reasonable wait time with a reduced minimum
-            wait_time = time_intervals[i] if time_intervals[i] > 0.005 else base_speed
+            perp_smooth_positions = perp_pid.step_towards_target(
+                perp_current_positions, perp_target, velocity_limit, steps=steps
+            )
+            
+            # Update current positions
+            flat_current_positions = flat_smooth_positions[-1].copy()
+            perp_current_positions = perp_smooth_positions[-1].copy()
+            
+            # Execute the smoothed trajectories
+            for j in range(len(flat_smooth_positions)):
+                # Set flat robot joint positions
+                for k, position in enumerate(flat_smooth_positions[min(j, len(flat_smooth_positions)-1)]):
+                    data.qpos[flat_joint_ids[k]] = position
+                
+                # Set perp robot joint positions
+                for k, position in enumerate(perp_smooth_positions[min(j, len(perp_smooth_positions)-1)]):
+                    data.qpos[perp_joint_ids[k]] = position
+                
+                # Forward kinematics
+                mujoco.mj_forward(model, data)
+                
+                # Render the scene
+                done = renderer.render()
+                if done:
+                    break
+                
+                # Small sleep between steps for visual smoothness
+                time.sleep(dt)
+            
+            # Use a reasonable wait time between waypoints (using the smaller time of the two)
+            wait_time = min(flat_time, perp_time)
+            wait_time = min(wait_time, 0.03) if wait_time > 0.005 else base_speed
             time.sleep(wait_time)
         
         print("Trajectory complete. Press Enter to continue...")

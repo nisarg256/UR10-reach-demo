@@ -7,9 +7,9 @@ from scipy.spatial.distance import cdist
 
 class RRTMotionPlanner:
     """
-    RRT-based motion planner for generating smooth trajectories between waypoints.
+    RRT-based motion planner for generating collision-free trajectories between waypoints.
     """
-    def __init__(self, model, data, joint_ids, joint_limits=None):
+    def __init__(self, model, data, joint_ids, joint_limits=None, max_iterations=1000):
         """
         Initialize the motion planner.
         
@@ -18,10 +18,12 @@ class RRTMotionPlanner:
             data: MuJoCo data
             joint_ids: List of joint IDs for the robot
             joint_limits: Optional dictionary with 'lower' and 'upper' arrays for joint limits
+            max_iterations: Maximum iterations for RRT algorithm
         """
         self.model = model
         self.data = data
         self.joint_ids = joint_ids
+        self.max_iterations = max_iterations
         
         # Set joint limits (if not provided, extract from model)
         if joint_limits is None:
@@ -30,7 +32,6 @@ class RRTMotionPlanner:
             self.joint_limits = joint_limits
             
         # RRT parameters
-        self.max_iterations = 1000  # Maximum iterations for RRT
         self.step_size = 0.2        # Step size for extending tree
         self.goal_sample_rate = 0.2 # Probability of sampling the goal
         
@@ -76,10 +77,18 @@ class RRTMotionPlanner:
     
     def _has_collision(self):
         """Check if the robot is in collision with environment or itself."""
-        for i in range(self.data.ncon):
+        # Quick check - if no contacts, return False
+        if self.data.ncon == 0:
+            return False
+            
+        # Only check a few contacts to improve performance
+        max_contacts_to_check = min(10, self.data.ncon)
+        
+        for i in range(max_contacts_to_check):
             contact = self.data.contact[i]
-            # Skip self-contacts that are part of the robot's structure
-            if contact.dist < 0:
+            # Skip contacts that are part of the robot's structure
+            # Only consider actual collisions (negative distance)
+            if contact.dist < -0.001:  # Small threshold to account for numerical errors
                 return True
         return False
     
@@ -92,8 +101,8 @@ class RRTMotionPlanner:
     
     def _nearest_node(self, nodes, sample):
         """Find the nearest node in the tree to the sample."""
-        distances = cdist([sample], nodes, 'euclidean')
-        return np.argmin(distances[0])
+        distances = np.sum((nodes - sample[np.newaxis, :])**2, axis=1)
+        return np.argmin(distances)
     
     def _steer(self, from_node, to_node):
         """Steer from one node toward another within step_size limit."""
@@ -110,6 +119,10 @@ class RRTMotionPlanner:
     
     def _is_path_collision_free(self, from_node, to_node):
         """Check if the path between nodes is collision-free."""
+        # Quick check of endpoints
+        if not self._is_collision_free(from_node) or not self._is_collision_free(to_node):
+            return False
+            
         # Check a few points along the path
         direction = to_node - from_node
         distance = np.linalg.norm(direction)
@@ -118,17 +131,23 @@ class RRTMotionPlanner:
             return True
             
         direction = direction / distance
-        num_checks = max(int(distance / self.collision_check_resolution), 2)
+        
+        # For short paths, just check endpoints
+        if distance < self.step_size:
+            return True
+            
+        # For longer paths, check a few intermediate points
+        num_checks = max(3, int(distance / self.step_size))
         
         for i in range(1, num_checks):
-            t = i / (num_checks - 1)
+            t = i / num_checks
             intermediate_node = from_node + t * distance * direction
             if not self._is_collision_free(intermediate_node):
                 return False
                 
         return True
     
-    def plan_path(self, start_config, goal_config, timeout=5.0):
+    def plan_path(self, start_config, goal_config, timeout=2.0):
         """
         Plan a path from start to goal configuration using RRT.
         
@@ -140,6 +159,10 @@ class RRTMotionPlanner:
         Returns:
             List of joint configurations forming a path, or None if no path found
         """
+        # First, check if direct path is possible
+        if self._is_path_collision_free(start_config, goal_config):
+            return [start_config, goal_config]
+            
         # Initialize the RRT
         nodes = [start_config]
         parent_indices = [0]  # Parent index for each node
@@ -150,7 +173,7 @@ class RRTMotionPlanner:
         for i in range(self.max_iterations):
             # Check timeout
             if time.time() - start_time > timeout:
-                print("RRT planning timeout reached")
+                print("  RRT planning timeout reached")
                 return None
                 
             # Sample a random point or goal
@@ -160,12 +183,16 @@ class RRTMotionPlanner:
                 sample = self._random_sample()
                 
             # Find nearest node
-            nearest_idx = self._nearest_node(nodes, sample)
+            nearest_idx = self._nearest_node(np.array(nodes), sample)
             nearest_node = nodes[nearest_idx]
             
             # Steer toward sample
             new_node = self._steer(nearest_node, sample)
             
+            # Skip if too similar to nearest node
+            if np.allclose(new_node, nearest_node):
+                continue
+                
             # Check if path is collision-free
             if self._is_path_collision_free(nearest_node, new_node):
                 # Add node to the tree
@@ -184,7 +211,7 @@ class RRTMotionPlanner:
                         path = self._extract_path(nodes, parent_indices)
                         return path
         
-        print("RRT planning failed: maximum iterations reached")
+        print(f"  RRT planning failed: maximum iterations ({self.max_iterations}) reached")
         return None
     
     def _extract_path(self, nodes, parent_indices):
@@ -309,7 +336,7 @@ def time_parameterization(trajectory, joint_velocities, max_velocity=1.0, max_ac
         return [0.0]
     
     # Initialize time intervals with a small default value
-    time_intervals = [0.02] * len(trajectory)  # Reduced default time
+    time_intervals = [0.03] * len(trajectory)  # Use a consistent default time
     
     # Scale time intervals based on joint velocities
     for i, velocity in enumerate(joint_velocities):
@@ -320,8 +347,8 @@ def time_parameterization(trajectory, joint_velocities, max_velocity=1.0, max_ac
         if max_joint_vel > 1e-6:
             # Minimum time needed to respect velocity limits
             min_time = max_joint_vel / max_velocity
-            # Cap the time value to ensure the robot keeps moving with a smaller maximum
-            time_intervals[i] = min(max(0.005, min_time * 0.03), 0.04)  # Reduced scaling and maximum
+            # Use a consistent scaling for smooth motion
+            time_intervals[i] = min(max(0.02, min_time * 0.1), 0.06)  # Higher minimum, lower maximum
     
     # Smooth out time intervals to avoid sudden changes
     smoothed_intervals = smooth_time_intervals(time_intervals, max_acceleration)
@@ -345,21 +372,25 @@ def smooth_time_intervals(time_intervals, max_acceleration):
     # Create a copy to avoid modifying the original
     smoothed = time_intervals.copy()
     
-    # Simple smoothing using a sliding window
-    for i in range(1, len(time_intervals)-1):
-        # Average with neighbors with weight
-        smoothed[i] = (time_intervals[i-1] + 2*time_intervals[i] + time_intervals[i+1]) / 4
+    # Apply multi-pass smoothing for more consistent timing
+    for _ in range(3):  # Multiple smoothing passes
+        # Simple smoothing using a sliding window
+        smoothed_copy = smoothed.copy()
+        for i in range(1, len(time_intervals)-1):
+            # Average with neighbors with weight
+            smoothed[i] = (smoothed_copy[i-1] + 2*smoothed_copy[i] + smoothed_copy[i+1]) / 4
     
-    # Apply time constraints - keeping times small enough for fast visualization
+    # Apply time constraints - keeping times consistent for more controlled motion
     for i in range(len(smoothed)):
-        # Min 5ms, max 40ms per step - reduced for faster motion
-        smoothed[i] = min(max(0.005, smoothed[i]), 0.04)
+        # More consistent timing range
+        smoothed[i] = min(max(0.02, smoothed[i]), 0.06)
     
     return smoothed
 
 def create_smooth_trajectory(waypoints, joint_configs, model, data, joint_ids, 
                             spline_density=5, velocity_limit=1.0, 
-                            acceleration_limit=2.0, check_collisions=False):
+                            acceleration_limit=2.0, check_collisions=False,
+                            rrt_timeout=2.0, max_iterations=1000):
     """
     Create a smooth trajectory through waypoints with time parameterization.
     
@@ -372,7 +403,9 @@ def create_smooth_trajectory(waypoints, joint_configs, model, data, joint_ids,
         spline_density: Points per segment (higher = smoother but slower)
         velocity_limit: Maximum joint velocity
         acceleration_limit: Maximum joint acceleration
-        check_collisions: Whether to check for collisions (not used in simplified version)
+        check_collisions: Whether to check for collisions
+        rrt_timeout: Timeout for RRT planning in seconds
+        max_iterations: Maximum iterations for RRT planning
         
     Returns:
         Time-parameterized smooth trajectory
@@ -387,6 +420,46 @@ def create_smooth_trajectory(waypoints, joint_configs, model, data, joint_ids,
     num_segments = len(waypoints) - 1
     num_points = num_segments * spline_density
     
+    # Create smooth waypoint paths with collision checking if enabled
+    if check_collisions:
+        print("Performing collision-aware trajectory planning...")
+        smooth_path = create_collision_free_path(
+            waypoints, joint_configs, model, data, joint_ids, 
+            num_points, rrt_timeout, max_iterations
+        )
+    else:
+        # Proceed with standard spline interpolation without collision checking
+        smooth_path = create_spline_path(waypoints, joint_configs, num_points)
+    
+    # Calculate joint velocities for time parameterization
+    joint_velocities = calculate_joint_velocities(smooth_path)
+    
+    # Apply time parameterization
+    time_intervals = time_parameterization(
+        smooth_path, joint_velocities, 
+        velocity_limit, acceleration_limit
+    )
+    
+    # Create final trajectory with timing information
+    timed_trajectory = []
+    for i, (point, config) in enumerate(smooth_path):
+        time_to_next = time_intervals[i] if i < len(time_intervals) else 0.0
+        timed_trajectory.append((point, config, time_to_next))
+    
+    return timed_trajectory
+
+def create_spline_path(waypoints, joint_configs, num_points):
+    """
+    Create a smooth path using cubic spline interpolation without collision checking.
+    
+    Args:
+        waypoints: List of (y, z) waypoints
+        joint_configs: List of joint configurations
+        num_points: Number of points to generate
+        
+    Returns:
+        List of (point, joint_config) pairs
+    """
     # Create parameter array (0 to 1) for the whole path
     t_eval = np.linspace(0, 1, num_points)
     
@@ -414,9 +487,6 @@ def create_smooth_trajectory(waypoints, joint_configs, model, data, joint_ids,
     # Generate smooth trajectory points
     smooth_trajectory = []
     
-    # Calculate joint velocities for time parameterization
-    joint_velocities = []
-    
     # Evaluate splines at each interpolation point
     for i, t in enumerate(t_eval):
         # Interpolate wall position
@@ -428,22 +498,151 @@ def create_smooth_trajectory(waypoints, joint_configs, model, data, joint_ids,
         
         # Store the position and configuration
         smooth_trajectory.append(((y, z), joint_values))
+    
+    return smooth_trajectory
+
+def create_collision_free_path(waypoints, joint_configs, model, data, joint_ids, 
+                              num_points, rrt_timeout=2.0, max_iterations=1000):
+    """
+    Create a collision-free path through waypoints using RRT planning and cubic spline interpolation.
+    
+    Args:
+        waypoints: List of (y, z) waypoints
+        joint_configs: List of joint configurations
+        model: MuJoCo model
+        data: MuJoCo data
+        joint_ids: List of joint IDs
+        num_points: Number of points in final trajectory
+        rrt_timeout: Timeout for RRT planning
+        max_iterations: Maximum iterations for RRT
         
-        # Calculate velocity if not at the last point
-        if i < len(t_eval) - 1:
-            next_t = t_eval[i+1]
-            next_joints = np.array([spline(next_t) for spline in joint_splines])
-            velocity = (next_joints - joint_values) / (next_t - t)
-            joint_velocities.append(velocity)
+    Returns:
+        List of (point, joint_config) pairs
+    """
+    # Initialize RRT planner
+    planner = RRTMotionPlanner(model, data, joint_ids, max_iterations=max_iterations)
     
-    # Time parameterization to ensure smooth motion
-    time_intervals = time_parameterization(smooth_trajectory, joint_velocities, 
-                                         velocity_limit, acceleration_limit)
+    # Initialize path segments
+    path_segments = []
     
-    # Create final trajectory with timing information
-    timed_trajectory = []
-    for i, ((y, z), config) in enumerate(smooth_trajectory):
-        time_to_next = time_intervals[i] if i < len(time_intervals) else 0.0
-        timed_trajectory.append(((y, z), config, time_to_next))
+    # Store any paths that failed RRT planning
+    failed_segments = []
     
-    return timed_trajectory 
+    # Process consecutive waypoint pairs
+    print(f"Planning collision-free path with {len(waypoints)-1} segments...")
+    for i in range(len(waypoints) - 1):
+        start_point = waypoints[i]
+        end_point = waypoints[i+1]
+        start_config = joint_configs[i]
+        end_config = joint_configs[i+1]
+        
+        # Check if direct path is collision-free
+        if planner._is_path_collision_free(start_config, end_config):
+            # No collision, use direct path
+            path_segments.append((start_point, end_point, [start_config, end_config]))
+        else:
+            # Plan a path using RRT
+            path = planner.plan_path(start_config, end_config, timeout=rrt_timeout)
+            
+            if path is not None:
+                path_segments.append((start_point, end_point, path))
+            else:
+                # If planning fails, just use linear interpolation and mark as failed
+                failed_segments.append(i)
+                path_segments.append((start_point, end_point, [start_config, end_config]))
+                print(f"  Path planning failed for segment {i} - using direct path")
+    
+    # Calculate points per segment based on segment length
+    total_length = 0
+    segment_lengths = []
+    for start_point, end_point, _ in path_segments:
+        length = np.sqrt((end_point[0] - start_point[0])**2 + (end_point[1] - start_point[1])**2)
+        segment_lengths.append(length)
+        total_length += length
+    
+    # Allocate points proportionally to segment length
+    points_per_segment = []
+    remaining_points = num_points
+    for i, length in enumerate(segment_lengths):
+        # Allocate at least 2 points per segment
+        if i < len(segment_lengths) - 1:
+            segment_points = max(2, int(length / total_length * num_points))
+            remaining_points -= segment_points
+            points_per_segment.append(segment_points)
+        else:
+            # Last segment gets remaining points
+            points_per_segment.append(max(2, remaining_points))
+    
+    # Generate smooth path
+    smooth_trajectory = []
+    
+    for i, ((start_point, end_point, path), num_segment_points) in enumerate(zip(path_segments, points_per_segment)):
+        # Parameter for interpolation
+        alphas = np.linspace(0, 1, num_segment_points)
+        
+        # Interpolate position
+        ys = np.linspace(start_point[0], end_point[0], num_segment_points)
+        zs = np.linspace(start_point[1], end_point[1], num_segment_points)
+        
+        # If we have enough points for cubic spline interpolation
+        if len(path) >= 4:
+            # Parameterize the path
+            distances = [0]
+            for j in range(1, len(path)):
+                distances.append(distances[-1] + np.linalg.norm(path[j] - path[j-1]))
+            
+            if distances[-1] > 0:  # Ensure the path has non-zero length
+                # Normalize distances
+                distances = np.array(distances) / distances[-1]
+                
+                # Create cubic splines for each joint
+                splines = []
+                for j in range(len(path[0])):
+                    joint_values = [config[j] for config in path]
+                    spline = CubicSpline(distances, joint_values)
+                    splines.append(spline)
+                
+                # Interpolate using splines
+                for alpha, y, z in zip(alphas, ys, zs):
+                    # Get interpolated joint values
+                    joint_values = np.array([spline(alpha) for spline in splines])
+                    smooth_trajectory.append(((y, z), joint_values))
+            else:
+                # Path has zero length, use direct interpolation
+                for alpha, y, z in zip(alphas, ys, zs):
+                    joint_values = (1 - alpha) * path[0] + alpha * path[-1]
+                    smooth_trajectory.append(((y, z), joint_values))
+        else:
+            # Linear interpolation for short paths
+            for alpha, y, z in zip(alphas, ys, zs):
+                joint_values = (1 - alpha) * path[0] + alpha * path[-1]
+                smooth_trajectory.append(((y, z), joint_values))
+    
+    if failed_segments:
+        print(f"Completed path planning with {len(failed_segments)} failed segments (using direct paths instead)")
+    else:
+        print("Successfully planned collision-free path for all segments")
+        
+    return smooth_trajectory
+
+def calculate_joint_velocities(trajectory):
+    """
+    Calculate joint velocities between each pair of points in the trajectory.
+    
+    Args:
+        trajectory: List of (point, joint_config) pairs
+        
+    Returns:
+        List of joint velocity vectors
+    """
+    if len(trajectory) <= 1:
+        return []
+    
+    joint_configs = [config for _, config in trajectory]
+    velocities = []
+    
+    for i in range(len(joint_configs) - 1):
+        velocity = joint_configs[i+1] - joint_configs[i]
+        velocities.append(velocity)
+    
+    return velocities 

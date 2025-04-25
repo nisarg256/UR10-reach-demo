@@ -56,6 +56,42 @@ class MujocoRenderer:
         glfw.set_framebuffer_size_callback(
             self.window, self._framebuffer_size_callback
         )
+        
+        # Mouse state
+        self.mouse_button_left = False
+        self.mouse_button_middle = False
+        self.mouse_button_right = False
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
+        
+        # Register mouse callbacks
+        glfw.set_mouse_button_callback(
+            self.window, self._mouse_button_callback
+        )
+        glfw.set_cursor_pos_callback(
+            self.window, self._mouse_move_callback
+        )
+        glfw.set_scroll_callback(
+            self.window, self._scroll_callback
+        )
+        
+        # Register key callback
+        glfw.set_key_callback(
+            self.window, self._key_callback
+        )
+        
+        # Display control instructions
+        self._show_control_help()
+    
+    def _show_control_help(self):
+        """Display camera control instructions in console"""
+        print("\nCamera Control Instructions:")
+        print("----------------------------")
+        print("Left mouse button + drag: Rotate camera")
+        print("Right mouse button + drag: Pan camera")
+        print("Mouse wheel: Zoom in/out")
+        print("R key: Reset camera view")
+        print("----------------------------\n")
     
     def _framebuffer_size_callback(self, window, width, height):
         """Handle window resizing."""
@@ -65,6 +101,78 @@ class MujocoRenderer:
         # Update context
         mujoco.mjr_freeContext(self.context)
         self.context = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
+    
+    def _mouse_button_callback(self, window, button, act, mods):
+        """Handle mouse button events."""
+        # Update button states
+        self.mouse_button_left = (button == glfw.MOUSE_BUTTON_LEFT and act == glfw.PRESS)
+        self.mouse_button_middle = (button == glfw.MOUSE_BUTTON_MIDDLE and act == glfw.PRESS)
+        self.mouse_button_right = (button == glfw.MOUSE_BUTTON_RIGHT and act == glfw.PRESS)
+        
+        # Update mouse position
+        x, y = glfw.get_cursor_pos(window)
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+    
+    def _mouse_move_callback(self, window, x, y):
+        """Handle mouse movement."""
+        # Compute displacement
+        dx = x - self.last_mouse_x
+        dy = y - self.last_mouse_y
+        
+        # Update mouse position
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+        
+        # Determine action based on mouse button
+        if self.mouse_button_left:
+            # Rotation: Adjust azimuth and elevation
+            self.camera.azimuth -= 0.5 * dx
+            # Keep azimuth in [0, 360]
+            self.camera.azimuth = self.camera.azimuth % 360.0
+            
+            # INVERTED: negative dy for upward mouse movement will increase elevation
+            self.camera.elevation -= 0.5 * dy
+            # Limit elevation to [-90, 90]
+            self.camera.elevation = np.clip(self.camera.elevation, -90.0, 90.0)
+            
+        elif self.mouse_button_right:
+            # Pan: Adjust lookat position
+            forward = np.array([np.cos(np.deg2rad(self.camera.azimuth)) * np.cos(np.deg2rad(self.camera.elevation)),
+                             np.sin(np.deg2rad(self.camera.azimuth)) * np.cos(np.deg2rad(self.camera.elevation)),
+                             np.sin(np.deg2rad(self.camera.elevation))])
+            
+            # Get camera right and up vectors
+            right = np.cross(forward, np.array([0, 0, 1]))
+            right = right / np.linalg.norm(right)
+            up = np.cross(right, forward)
+            up = up / np.linalg.norm(up)
+            
+            # Scale movements by distance for more natural panning
+            scale_factor = 0.0005 * self.camera.distance
+            
+            # Update lookat position
+            self.camera.lookat[0] -= scale_factor * (dx * right[0] + dy * up[0])
+            self.camera.lookat[1] -= scale_factor * (dx * right[1] + dy * up[1])
+            self.camera.lookat[2] -= scale_factor * (dx * right[2] + dy * up[2])
+    
+    def _scroll_callback(self, window, x_offset, y_offset):
+        """Handle mouse scroll for zooming."""
+        # Adjust camera distance
+        self.camera.distance -= 0.2 * y_offset
+        # Ensure distance is positive
+        self.camera.distance = max(0.1, self.camera.distance)
+    
+    def _key_callback(self, window, key, scancode, action, mods):
+        """Handle keyboard input."""
+        if key == glfw.KEY_R and action == glfw.PRESS:
+            # Reset camera view
+            self.camera.azimuth = 90.0
+            self.camera.elevation = -20.0
+            self.camera.distance = 4.0
+            self.camera.lookat[0] = 0.7
+            self.camera.lookat[1] = 0.0
+            self.camera.lookat[2] = 1.2
     
     def render(self):
         """Render the scene to the window."""
@@ -84,10 +192,37 @@ class MujocoRenderer:
         viewport = mujoco.MjrRect(0, 0, self.width, self.height)
         mujoco.mjr_render(viewport, self.scene, self.context)
         
+        # Add on-screen controls help text
+        self._add_onscreen_help()
+        
         # Swap buffers
         glfw.swap_buffers(self.window)
         
         return False  # Continue rendering
+    
+    def _add_onscreen_help(self):
+        """Add on-screen help text for controls."""
+        text = [
+            "Left mouse: Rotate",
+            "Right mouse: Pan",
+            "Scroll: Zoom",
+            "R key: Reset view"
+        ]
+        
+        viewport = mujoco.MjrRect(0, 0, self.width, self.height)
+        
+        # Set position and overlay
+        for i, line in enumerate(text):
+            x_pos = 10
+            y_pos = self.height - 20 * (i + 1)
+            mujoco.mjr_overlay(
+                mujoco.mjtFont.mjFONT_NORMAL,
+                mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                viewport,
+                line,
+                "",
+                self.context
+            )
     
     def close(self):
         """Close the renderer and release resources."""
